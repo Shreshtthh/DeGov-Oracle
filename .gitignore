@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Motoko / Internet Computer
+.dfx/
+canister_ids.json
+
+# Operating System Files
+.DS_Store
+Thumbs.db

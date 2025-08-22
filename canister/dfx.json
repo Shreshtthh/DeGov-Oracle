@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "canisters": {
+    "degov_oracle": {
+      "type": "motoko",
+      "main": "src/degov_oracle/main.mo"
+    }
+  },
+  "networks": {
+    "local": {
+      "bind": "127.0.0.1:4943",
+      "type": "ephemeral"
+    },
+    "ic": {
+      "providers": ["https://icp0.io"],
+      "type": "persistent"
+    }
+  }
+}

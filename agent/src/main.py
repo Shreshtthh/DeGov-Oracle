@@ -12,22 +12,34 @@ from utils import format_response, validate_input
 # Load environment variables
 load_dotenv()
 
-# Initialize agent with proper endpoint configuration
+# Get port from environment (Render uses PORT, Heroku uses PORT too)
+port = int(os.getenv("PORT", 8001))
+
+# Initialize agent with proper configuration for deployment
 agent = Agent(
     name=os.getenv("AGENT_NAME", "degov_oracle"),
-    seed=os.getenv("AGENT_SEED", "default-seed"),
-    port=int(os.getenv("AGENT_PORT", 8001)),
-    endpoint=[f"http://localhost:{os.getenv('AGENT_PORT', 8001)}/submit"]  # Add endpoint
+    seed=os.getenv("AGENT_SEED", "degov-oracle-seed-12345"),
+    port=port,
+    endpoint=[f"http://0.0.0.0:{port}/submit"]  # Use 0.0.0.0 for external access
 )
 
 # Fund agent if needed (this also helps with registration)
-fund_agent_if_low(agent.wallet.address())
+try:
+    fund_agent_if_low(agent.wallet.address())
+except Exception as e:
+    print(f"Note: Could not fund agent automatically: {e}")
 
 # Initialize components
 intent_classifier = IntentClassifier()
-canister_client = CanisterClient(
-    canister_url=os.getenv("CANISTER_URL") or os.getenv("LOCAL_CANISTER_URL")
+
+# Initialize canister client with fallback
+canister_url = (
+    os.getenv("CANISTER_URL") or 
+    os.getenv("LOCAL_CANISTER_URL") or 
+    "http://localhost:4943/?canisterId=rdmx6-jaaaa-aaaaa-aaadq-cai"  # fallback
 )
+
+canister_client = CanisterClient(canister_url)
 
 # Define a simple Pydantic model for string messages
 class Message(BaseModel):
@@ -209,11 +221,15 @@ async def startup_event(ctx: Context):
     ctx.logger.info(f"DeGov Oracle Agent started!")
     ctx.logger.info(f"Agent address: {agent.address}")
     ctx.logger.info(f"Agent wallet: {agent.wallet.address()}")
+    ctx.logger.info(f"Running on port: {port}")
+    ctx.logger.info(f"Canister URL: {canister_url}")
 
 if __name__ == "__main__":
     print(f"DeGov Oracle Agent starting...")
     print(f"Agent address: {agent.address}")
     print(f"Agent wallet: {agent.wallet.address()}")
+    print(f"Running on port: {port}")
+    print(f"Canister URL: {canister_url}")
     
     # Run the agent
     agent.run()

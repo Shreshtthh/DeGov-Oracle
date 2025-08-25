@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: degov-oracle-agent
+    env: python
+    buildCommand: cd agent && pip install -r requirements.txt
+    startCommand: cd agent && python src/main.py
+    envVars:
+      - key: AGENT_NAME
+        value: degov_oracle
+      - key: AGENT_SEED
+        value: your-unique-seed-here
+      - key: CANISTER_URL
+        sync: false  # Will set this manually after canister deployment

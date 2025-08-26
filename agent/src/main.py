@@ -6,11 +6,14 @@ while preserving all original governance functionality.
 
 import os
 import asyncio
-from datetime import datetime
+import json
+import re
+import requests
+from datetime import datetime, UTC
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from pydantic import BaseModel                          # still used by utils/helpers
+from pydantic import BaseModel
 from uagents import Agent, Context, Protocol
 from uagents.setup import fund_agent_if_low
 
@@ -28,7 +31,6 @@ from canister_client import CanisterClient
 from utils import format_response, validate_input
 
 # -----------------------------------------------------------------------------
-
 
 # 1. Environment / deployment -------------------------------------------------
 load_dotenv()
@@ -60,7 +62,83 @@ except Exception as e:
 intent_classifier = IntentClassifier()
 canister_client = CanisterClient(CANISTER_URL)
 
-# 3. Chat protocol implementation --------------------------------------------
+# 3. Agentverse API integration -----------------------------------------------
+async def update_agent_details():
+    """Update agent name and readme via Agentverse API"""
+    try:
+        # Read README content
+        readme_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'readme.md')
+        readme_content = ""
+        
+        try:
+            with open(readme_path, 'r', encoding='utf-8') as f:
+                readme_content = f.read()
+        except FileNotFoundError:
+            print(f"[WARN] README file not found at {readme_path}")
+            readme_content = "# DeGov Oracle\n\nA decentralized governance oracle agent."
+        
+        # Get agent address (after agent is created)
+        agent_address = agent.address
+        
+        # Agentverse API details
+        api_url = f"https://agentverse.ai/v1/hosting/agents/{agent_address}"
+        headers = {
+            "Authorization": f"bearer YOUR_API_KEY_HERE",  # Replace with your actual API key
+            "Content-Type": "application/json"
+        }
+        
+        # Update data
+        update_data = {
+            "name": "DeGov Oracle"
+        }
+        
+        # Make the API call to update name
+        response = requests.patch(api_url, headers=headers, json=update_data)
+        
+        if response.status_code == 200:
+            print("✅ Agent name updated to 'DeGov Oracle'")
+        else:
+            print(f"❌ Failed to update agent name: {response.status_code} - {response.text}")
+            
+        # Note: README update might need to be done through a different endpoint
+        # The Hosting API documentation shows code updates, which might include README
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to update agent details: {e}")
+
+# 4. Proposal parsing helper --------------------------------------------------
+def extract_proposal_details(message):
+    """Extract title and options from user message"""
+    print(f"[DEBUG] Extracting proposal details from: {message}")
+    
+    # Remove "Create proposal:" prefix
+    content = message.replace("Create proposal:", "").strip()
+    
+    if "with options" in content:
+        parts = content.split("with options")
+        title = parts[0].strip()
+        options_text = parts[1].strip()
+        
+        # Split options by comma and clean up
+        options = []
+        for opt in re.split(r'[,\s]+', options_text):
+            opt = opt.strip()
+            if opt:
+                options.append(opt)
+    else:
+        title = content
+        options = ["Yes", "No"]  # Default options
+    
+    print(f"[DEBUG] Extracted - Title: '{title}', Options: {options}")
+    
+    return {
+        'title': title,
+        'description': title,
+        'options': options,
+        'duration_hours': 72
+    }
+
+# 5. Chat protocol implementation --------------------------------------------
 chat_protocol = Protocol(spec=chat_protocol_spec)
 
 @chat_protocol.on_message(ChatMessage)
@@ -71,7 +149,7 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
         await ctx.send(
             sender,
             ChatAcknowledgement(
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 acknowledged_msg_id=msg.msg_id,
             ),
         )
@@ -93,7 +171,7 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
             ctx.logger.info(f"[intent] {intent} | {params}")
 
             if intent == "CREATE_PROPOSAL":
-                response = await handle_create_proposal(ctx, params, sender)
+                response = await handle_create_proposal(ctx, text, sender)
             elif intent == "CAST_VOTE":
                 response = await handle_cast_vote(ctx, params, sender)
             elif intent == "CHECK_STATUS":
@@ -113,7 +191,7 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
         await ctx.send(
             sender,
             ChatMessage(
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 msg_id=uuid4(),
                 content=[TextContent(type="text", text=format_response(response))],
             ),
@@ -124,7 +202,7 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
         await ctx.send(
             sender,
             ChatMessage(
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 msg_id=uuid4(),
                 content=[TextContent(type="text", text="Sorry, an error occurred.")],
             ),
@@ -134,30 +212,32 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
 async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
     ctx.logger.info(f"[ack] from {sender} for {msg.acknowledged_msg_id}")
 
-# 4. Governance helpers (complete implementation) ----------------------------
-async def handle_create_proposal(ctx: Context, params: dict, creator: str):
-    """Handle proposal creation"""
+# 6. Governance helpers (complete implementation with better error handling) ---
+async def handle_create_proposal(ctx: Context, message: str, creator: str):
+    """Handle proposal creation with improved parsing"""
     try:
-        if not all(k in params for k in ['title', 'description', 'options']):
+        params = extract_proposal_details(message)
+        
+        if not params['title']:
             return "To create a proposal, I need: title, description, and voting options. Try: 'Create proposal: Fund marketing campaign with options For and Against'"
         
         result = await canister_client.create_proposal(
             title=params['title'],
             description=params['description'],
             options=params['options'],
-            duration_hours=params.get('duration_hours', 72),
+            duration_hours=params['duration_hours'],
             creator=creator
         )
         
         if result['success']:
             proposal_id = result['data']
-            return f"✅ Proposal #{proposal_id} created successfully!\n\nTitle: {params['title']}\nVoting is now open for 72 hours."
+            return f"✅ Proposal #{proposal_id} created successfully!\n\nTitle: {params['title']}\nOptions: {', '.join(params['options'])}\nVoting is now open for 72 hours."
         else:
             return f"❌ Failed to create proposal: {result['error']}"
             
     except Exception as e:
         ctx.logger.error(f"Error creating proposal: {str(e)}")
-        return "Sorry, I couldn't create the proposal. Please try again."
+        return f"❌ Failed to create proposal: {str(e)}"
 
 async def handle_cast_vote(ctx: Context, params: dict, voter: str):
     """Handle vote casting"""
@@ -176,9 +256,20 @@ async def handle_cast_vote(ctx: Context, params: dict, voter: str):
             status_result = await canister_client.get_proposal(params['proposal_id'])
             if status_result['success']:
                 proposal = status_result['data']
-                votes_list = proposal.get('votes', [])
-                vote_summary = ", ".join([f"{opt}: {count}" for opt, count in votes_list])
-                return f"✅ Vote cast successfully!\n\nProposal #{params['proposal_id']} current results:\n{vote_summary}"
+                
+                # Safe dictionary access
+                if isinstance(proposal, str):
+                    try:
+                        proposal = json.loads(proposal)
+                    except:
+                        return "✅ Vote cast successfully!"
+                
+                if isinstance(proposal, dict):
+                    votes_list = proposal.get('votes', [])
+                    vote_summary = ", ".join([f"{opt}: {count}" for opt, count in votes_list])
+                    return f"✅ Vote cast successfully!\n\nProposal #{params['proposal_id']} current results:\n{vote_summary}"
+                else:
+                    return "✅ Vote cast successfully!"
             else:
                 return "✅ Vote cast successfully!"
         else:
@@ -186,10 +277,10 @@ async def handle_cast_vote(ctx: Context, params: dict, voter: str):
             
     except Exception as e:
         ctx.logger.error(f"Error casting vote: {str(e)}")
-        return "Sorry, I couldn't cast your vote. Please try again."
+        return f"❌ Failed to cast vote: {str(e)}"
 
 async def handle_check_status(ctx: Context, params: dict):
-    """Handle status checks"""
+    """Handle status checks with safe dictionary access"""
     try:
         proposal_id = params.get('proposal_id')
         if not proposal_id:
@@ -199,19 +290,34 @@ async def handle_check_status(ctx: Context, params: dict):
         
         if result['success']:
             proposal = result['data']
+            
+            # Safe dictionary access
+            if isinstance(proposal, str):
+                try:
+                    proposal = json.loads(proposal)
+                except:
+                    return f"❌ Invalid proposal data format"
+            
+            if not isinstance(proposal, dict):
+                return f"❌ Invalid proposal data: {proposal}"
+            
+            proposal_id = proposal.get('id', 'unknown')
+            title = proposal.get('title', 'Unknown')
             votes_list = proposal.get('votes', [])
+            status = proposal.get('status', 'Unknown')
+            
             vote_summary = "\n".join([f"  {opt}: {count} votes" for opt, count in votes_list])
             total_votes = sum([count for opt, count in votes_list])
             
-            status_emoji = "🟢" if proposal.get('status') == 'Active' else "🔴"
+            status_emoji = "🟢" if status == 'Active' else "🔴"
             
-            return f"{status_emoji} Proposal #{proposal['id']}: {proposal['title']}\n\nResults ({total_votes} total votes):\n{vote_summary}\n\nStatus: {proposal['status']}"
+            return f"{status_emoji} Proposal #{proposal_id}: {title}\n\nResults ({total_votes} total votes):\n{vote_summary}\n\nStatus: {status}"
         else:
             return f"❌ Could not find proposal: {result['error']}"
             
     except Exception as e:
         ctx.logger.error(f"Error checking status: {str(e)}")
-        return "Sorry, I couldn't check the proposal status. Please try again."
+        return f"❌ Error checking status: {str(e)}"
 
 async def handle_list_active(ctx: Context):
     """Handle listing active proposals"""
@@ -225,17 +331,22 @@ async def handle_list_active(ctx: Context):
             
             proposal_list = []
             for proposal in proposals[:5]:
-                votes_list = proposal.get('votes', [])
-                total_votes = sum([count for opt, count in votes_list])
-                proposal_list.append(f"#{proposal['id']}: {proposal['title']} ({total_votes} votes)")
+                # Safe dictionary access
+                if isinstance(proposal, dict):
+                    votes_list = proposal.get('votes', [])
+                    total_votes = sum([count for opt, count in votes_list])
+                    proposal_list.append(f"#{proposal.get('id', '?')}: {proposal.get('title', 'Unknown')} ({total_votes} votes)")
             
-            return f"📋 Active Proposals:\n\n" + "\n".join(proposal_list) + f"\n\nShowing {len(proposal_list)} proposals. Say 'status of proposal X' for details."
+            if proposal_list:
+                return f"📋 Active Proposals:\n\n" + "\n".join(proposal_list) + f"\n\nShowing {len(proposal_list)} proposals. Say 'status of proposal X' for details."
+            else:
+                return "📝 No active proposals at the moment. Would you like to create one?"
         else:
             return f"❌ Could not fetch proposals: {result['error']}"
             
     except Exception as e:
         ctx.logger.error(f"Error listing proposals: {str(e)}")
-        return "Sorry, I couldn't fetch the active proposals. Please try again."
+        return f"❌ Error listing proposals: {str(e)}"
 
 def get_help_message() -> str:
     return (
@@ -247,10 +358,13 @@ def get_help_message() -> str:
         "Just talk to me naturally - I'll understand! 🚀"
     )
 
-# 5. Health endpoint (unchanged except protocol list) -------------------------
+# 7. Health endpoint and startup ----------------------------------------------
 @agent.on_event("startup")
 async def startup(ctx: Context):
     try:
+        # Update agent details
+        await update_agent_details()
+        
         if hasattr(ctx, "server") and hasattr(ctx.server, "_app"):
             async def health():
                 return {
@@ -264,14 +378,14 @@ async def startup(ctx: Context):
             ctx.logger.info("Health endpoint mounted")
     except Exception as e:
         ctx.logger.warning(f"Health endpoint error: {e}")
-
+    
     ctx.logger.info("DeGov Oracle Agent ready 🎉")
     ctx.logger.info(f"Agent address: {agent.address}")
     ctx.logger.info(f"Endpoint URL: {ENDPOINT_URL}")
     ctx.logger.info(f"Canister URL: {CANISTER_URL}")
     ctx.logger.info("Using Chat Protocol for ASI:One compatibility")
 
-# 6. Register protocol & run --------------------------------------------------
+# 8. Register protocol & run --------------------------------------------------
 agent.include(chat_protocol, publish_manifest=True)
 
 if __name__ == "__main__":

@@ -56,8 +56,8 @@ class CanisterClient:
         needing an explicit IDL schema.  Strategy:
            python → JSON str → encode([text])
         """
-        json_blob = json.dumps(args, separators=(",", ":"))
-        return encode([json_blob])
+        wrapped = args if isinstance(args, (dict, list, tuple)) else [args]
+        return encode([wrapped])
 
     # ---------------------------------------------------------------------
     # low-level query & update routes

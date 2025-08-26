@@ -10,19 +10,21 @@ import cbor2
 from ic.candid import encode, decode
 from ic.principal import Principal
 
-_LOG = logging.getLogger("canister_client")
-_LOG.setLevel(logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s %(message)s',
+)
 
+_LOG = logging.getLogger("canister_client")
+_LOG.setLevel(logging.DEBUG)
 
 class CanisterClient:
     """
     Minimal ICP HTTP-gateway client.
-    Converts arbitrary python args → JSON → Candid bytes
-    so we don't need a full IDL schema during the hackathon.
+    Converts arbitrary python args → Candid bytes for Motoko canister calls.
     """
 
     def __init__(self, canister_url: str):
-        # --- derive canisterId & boundary URL --------------------------------
         if "canisterId=" in canister_url:
             self.canister_id = canister_url.split("canisterId=")[1].split("&")[0]
             self.boundary_node_url = canister_url.split("?")[0]
@@ -32,15 +34,11 @@ class CanisterClient:
         elif ".raw.icp0.io" in canister_url:
             self.canister_id = canister_url.split("://")[1].split(".")[0]
             self.boundary_node_url = "https://icp0.io"
-        else:  # fallback: raw ID
+        else:
             self.canister_id = canister_url
             self.boundary_node_url = "https://icp0.io"
-
         self.session: aiohttp.ClientSession | None = None
 
-    # ---------------------------------------------------------------------
-    # helpers
-    # ---------------------------------------------------------------------
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None:
             self.session = aiohttp.ClientSession(
@@ -51,21 +49,17 @@ class CanisterClient:
 
     @staticmethod
     def _encode_args(args: Any) -> bytes:
-        """
-        Encode arbitrary python data to Candid without
-        needing an explicit IDL schema.  Strategy:
-           python → JSON str → encode([text])
-        """
+        # Log argument type and value before encoding
+        logging.debug(f"_encode_args: args={args}, type={type(args)}")
+        # Most Motoko calls want args as tuple/list if >1 arg
         if isinstance(args, (list, tuple)):
             return encode(args)
         else:
             return encode([args])
 
-    # ---------------------------------------------------------------------
-    # low-level query & update routes
-    # ---------------------------------------------------------------------
     async def _query_canister(self, method: str, args: Any) -> Dict[str, Any]:
         try:
+            logging.debug(f"_query_canister: method={method}, args={args}, type={type(args)}")
             payload = {
                 "request_type": "query",
                 "sender": Principal.anonymous(),
@@ -75,36 +69,43 @@ class CanisterClient:
                 "ingress_expiry": int((time.time() + 300) * 1_000_000_000),
             }
             envelope = cbor2.dumps({"content": payload})
-            url = (
-                f"{self.boundary_node_url}/api/v2/canister/"
-                f"{self.canister_id}/query"
-            )
+            url = f"{self.boundary_node_url}/api/v2/canister/{self.canister_id}/query"
+            logging.debug(f"POST {url} with payload: {payload}")
 
             session = await self._get_session()
             async with session.post(url, data=envelope) as resp:
+                raw_data = await resp.read()
+                logging.debug(f"HTTP status={resp.status}")
                 if resp.status != 200:
-                    return {
-                        "success": False,
-                        "error": f"HTTP {resp.status}: {await resp.text()}",
-                    }
+                    error_text = await resp.text()
+                    logging.error(f"Query error: {error_text}")
+                    return {"success": False, "error": f"HTTP {resp.status}: {error_text}"}
 
-                data = cbor2.loads(await resp.read())
+                data = cbor2.loads(raw_data)
+                logging.debug(f"CBOR loaded reply: {data}")
+
                 if "replied" in data:
+                    decoded = decode(data["replied"]["arg"])
+                    logging.debug(f"Decoded canister reply: {decoded}, type={type(decoded)}")
                     return {
                         "success": True,
-                        "data": decode(data["replied"]["arg"])[0],
+                        "data": decoded[0],
                     }
                 if "rejected" in data:
+                    logging.error(f"Query rejected: {data['rejected']}")
                     return {"success": False, "error": data["rejected"]}
+                logging.error("Unknown response format")
                 return {"success": False, "error": "Unknown response format"}
         except asyncio.TimeoutError:
+            logging.error("Timeout error")
             return {"success": False, "error": "Request timeout"}
         except Exception as exc:
-            _LOG.exception(exc)
+            logging.exception("Exception in _query_canister")
             return {"success": False, "error": f"Network error: {exc}"}
 
     async def _update_canister(self, method: str, args: Any) -> Dict[str, Any]:
         try:
+            logging.debug(f"_update_canister: method={method}, args={args}, type={type(args)}")
             payload = {
                 "request_type": "call",
                 "sender": Principal.anonymous(),
@@ -114,46 +115,40 @@ class CanisterClient:
                 "ingress_expiry": int((time.time() + 300) * 1_000_000_000),
             }
             envelope = cbor2.dumps({"content": payload})
-            url = (
-                f"{self.boundary_node_url}/api/v2/canister/"
-                f"{self.canister_id}/call"
-            )
+            url = f"{self.boundary_node_url}/api/v2/canister/{self.canister_id}/call"
+            logging.debug(f"POST {url} with payload: {payload}")
 
             session = await self._get_session()
             async with session.post(url, data=envelope) as resp:
+                raw_data = await resp.read()
+                logging.debug(f"HTTP status={resp.status}")
                 if resp.status == 202:
+                    logging.debug("Update accepted")
+                    # The update path may need to poll for reply in ICP real canister
                     return {"success": True, "data": "Update accepted"}
-                return {
-                    "success": False,
-                    "error": f"HTTP {resp.status}: {await resp.text()}",
-                }
+                error_text = await resp.text()
+                logging.error(f"Call error: {error_text}")
+                return {"success": False, "error": f"HTTP {resp.status}: {error_text}"}
         except asyncio.TimeoutError:
+            logging.error("Timeout error")
             return {"success": False, "error": "Request timeout"}
         except Exception as exc:
-            _LOG.exception(exc)
+            logging.exception("Exception in _update_canister")
             return {"success": False, "error": f"Network error: {exc}"}
 
-    # ---------------------------------------------------------------------
-    # public helpers
-    # ---------------------------------------------------------------------
-    async def _call_canister(
-        self, method: str, args: Any, is_query: bool = True
-    ) -> Dict[str, Any]:
-        # local dev short-circuit
+    async def _call_canister(self, method: str, args: Any, is_query: bool = True) -> Dict[str, Any]:
+        logging.debug(f"_call_canister: method={method}, args={args}, type={type(args)} is_query={is_query}")
         if any(host in self.boundary_node_url for host in ("127.0.0.1", "localhost")):
+            logging.debug("Calling mock response (local)")
             return await self._mock_response(method, args)
-        return (
-            await self._query_canister(method, args)
-            if is_query
-            else await self._update_canister(method, args)
-        )
+        if is_query:
+            return await self._query_canister(method, args)
+        else:
+            return await self._update_canister(method, args)
 
-    # ---------------------------------------------------------------------
-    # mock endpoints for local tests
-    # ---------------------------------------------------------------------
     async def _mock_response(self, method: str, args: Any) -> Dict[str, Any]:
+        logging.debug(f"_mock_response: method={method}, args={args}, type={type(args)}")
         import random
-
         if method == "createProposal":
             return {"success": True, "data": random.randint(1, 1000)}
         if method == "castVote":
@@ -182,8 +177,6 @@ class CanisterClient:
             return {"success": True, "data": [("For", 5), ("Against", 2)]}
         return {"success": False, "error": "Unknown method"}
 
-    # ---------------------------------------------------------------------
-    # DAO-specific helpers  ----------------------------------------------
     async def create_proposal(
         self,
         title: str,
@@ -192,36 +185,36 @@ class CanisterClient:
         duration_hours: int,
         creator: str,
     ) -> Dict[str, Any]:
-        args = {
+        args = ({
             "title": title,
             "description": description,
             "options": options,
             "duration_hours": duration_hours,
-        },
-        creator
-
+        }, creator)
+        logging.debug(f"create_proposal: args={args}, type={type(args)}")
         return await self._call_canister("createProposal", args, is_query=False)
 
-    async def cast_vote(
-        self, proposal_id: int, option: str, voter_id: str
-    ) -> Dict[str, Any]:
+    async def cast_vote(self, proposal_id: int, option: str, voter_id: str) -> Dict[str, Any]:
         args = {"proposal_id": proposal_id, "option": option, "voter_id": voter_id}
+        logging.debug(f"cast_vote: args={args}, type={type(args)}")
         return await self._call_canister("castVote", args, is_query=False)
 
     async def get_proposal(self, proposal_id: int) -> Dict[str, Any]:
+        logging.debug(f"get_proposal: proposal_id={proposal_id}")
         return await self._call_canister(
             "getProposal", {"proposalId": proposal_id}, is_query=True
         )
 
     async def get_active_proposals(self) -> Dict[str, Any]:
+        logging.debug("get_active_proposals called")
         return await self._call_canister("getActiveProposals", {}, is_query=True)
 
     async def get_proposal_results(self, proposal_id: int) -> Dict[str, Any]:
+        logging.debug(f"get_proposal_results: proposal_id={proposal_id}")
         return await self._call_canister(
             "getProposalResults", {"proposalId": proposal_id}, is_query=True
         )
 
-    # ---------------------------------------------------------------------
     async def close(self):
         if self.session:
             await self.session.close()

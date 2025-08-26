@@ -1,94 +1,140 @@
-import asyncio
+"""
+DeGov-Oracle main.py
+Implements the uAgents Chat Protocol for ASI:One compatibility
+while preserving all original governance functionality.
+"""
+
 import os
+import asyncio
+from datetime import datetime
+from uuid import uuid4
+
 from dotenv import load_dotenv
+from pydantic import BaseModel                          # still used by utils/helpers
 from uagents import Agent, Context, Protocol
 from uagents.setup import fund_agent_if_low
-from pydantic import BaseModel
 
+# --- Chat-protocol primitives -----------------------------------------------
+from uagents_core.contrib.protocols.chat import (
+    ChatAcknowledgement,
+    ChatMessage,
+    TextContent,
+    chat_protocol_spec,
+)
+
+# --- Local modules -----------------------------------------------------------
 from intents import IntentClassifier
 from canister_client import CanisterClient
 from utils import format_response, validate_input
 
-# Load environment variables
+# -----------------------------------------------------------------------------
+
+
+# 1. Environment / deployment -------------------------------------------------
 load_dotenv()
 
-# Get deployment-specific configuration
 PORT = int(os.getenv("PORT", 8001))
-
-# Use Render's standard variable, falling back to localhost for local testing
 ENDPOINT_URL = os.getenv("RENDER_EXTERNAL_URL", f"http://127.0.0.1:{PORT}")
 
-# Initialize canister client
-canister_url = (
-    os.getenv("CANISTER_URL") or 
-    os.getenv("LOCAL_CANISTER_URL") or 
-    "http://localhost:4943/?canisterId=rdmx6-jaaaa-aaaaa-aaadq-cai"
+CANISTER_URL = (
+    os.getenv("CANISTER_URL")
+    or os.getenv("LOCAL_CANISTER_URL")
+    or "http://localhost:4943/?canisterId=rdmx6-jaaaa-aaaaa-aaadq-cai"
 )
 
-# Initialize agent with proper configuration for deployment
 agent = Agent(
     name=os.getenv("AGENT_NAME", "degov_oracle"),
     seed=os.getenv("AGENT_SEED", "degov-oracle-seed-12345"),
     port=PORT,
     endpoint=[f"{ENDPOINT_URL}/submit"],
-    mailbox=True  # Required for Agentverse registration
+    mailbox=True,        # required for Agentverse registration
 )
 
-# Fund agent if needed
+# fund if necessary (ignore on testnets)
 try:
     fund_agent_if_low(agent.wallet.address())
 except Exception as e:
-    print(f"Note: Could not fund agent automatically: {e}")
+    print(f"[WARN] could not auto-fund wallet: {e}")
 
-# Initialize components
+# 2. Core helpers -------------------------------------------------------------
 intent_classifier = IntentClassifier()
-canister_client = CanisterClient(canister_url)
+canister_client = CanisterClient(CANISTER_URL)
 
-# Define message model
-class Message(BaseModel):
-    message: str
+# 3. Chat protocol implementation --------------------------------------------
+chat_protocol = Protocol(spec=chat_protocol_spec)
 
-# Setup chat protocol
-chat_protocol = Protocol("DeGov Chat")
-
-@chat_protocol.on_message(model=Message)
-async def handle_message(ctx: Context, sender: str, msg: Message):
-    """Main message handler"""
+@chat_protocol.on_message(ChatMessage)
+async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
+    """Main entry-point for ASI:One chat messages."""
     try:
-        # Log incoming message
-        ctx.logger.info(f"Received message from {sender}: {msg.message}")
-        
-        # Validate input
-        if not validate_input(msg.message):
-            await ctx.send(sender, Message(message="Please provide a valid message. I can help you create proposals, vote, or check proposal status."))
-            return
-        
-        # Classify intent and extract parameters
-        intent, params = intent_classifier.classify(msg.message)
-        ctx.logger.info(f"Classified intent: {intent}, params: {params}")
-        
-        # Route to appropriate handler
-        if intent == "CREATE_PROPOSAL":
-            response = await handle_create_proposal(ctx, params, sender)
-        elif intent == "CAST_VOTE":
-            response = await handle_cast_vote(ctx, params, sender)
-        elif intent == "CHECK_STATUS":
-            response = await handle_check_status(ctx, params)
-        elif intent == "LIST_ACTIVE":
-            response = await handle_list_active(ctx)
-        elif intent == "HELP":
-            response = get_help_message()
-        else:
-            response = "I didn't understand that. Try saying something like 'create a proposal' or 'show active proposals'."
-        
-        # Send formatted response
-        formatted_response = format_response(response)
-        await ctx.send(sender, Message(message=formatted_response))
-        
-    except Exception as e:
-        ctx.logger.error(f"Error handling message: {str(e)}")
-        await ctx.send(sender, Message(message="Sorry, I encountered an error. Please try again."))
+        # --- acknowledge -----------------------------------------------------
+        await ctx.send(
+            sender,
+            ChatAcknowledgement(
+                timestamp=datetime.utcnow(),
+                acknowledged_msg_id=msg.msg_id,
+            ),
+        )
 
+        # --- extract user text ----------------------------------------------
+        text = " ".join(
+            item.text for item in msg.content if isinstance(item, TextContent)
+        )
+        ctx.logger.info(f"[chat] from {sender}: {text}")
+
+        # --- validate & route ------------------------------------------------
+        if not validate_input(text):
+            response = (
+                "Please provide a valid message. "
+                "I can create proposals, cast votes, or check proposal status."
+            )
+        else:
+            intent, params = intent_classifier.classify(text)
+            ctx.logger.info(f"[intent] {intent} | {params}")
+
+            if intent == "CREATE_PROPOSAL":
+                response = await handle_create_proposal(ctx, params, sender)
+            elif intent == "CAST_VOTE":
+                response = await handle_cast_vote(ctx, params, sender)
+            elif intent == "CHECK_STATUS":
+                response = await handle_check_status(ctx, params)
+            elif intent == "LIST_ACTIVE":
+                response = await handle_list_active(ctx)
+            elif intent == "HELP":
+                response = get_help_message()
+            else:
+                response = (
+                    "I didn't understand. Try: "
+                    "'create a proposal', 'vote on proposal 1', "
+                    "or 'show active proposals'."
+                )
+
+        # --- reply -----------------------------------------------------------
+        await ctx.send(
+            sender,
+            ChatMessage(
+                timestamp=datetime.utcnow(),
+                msg_id=uuid4(),
+                content=[TextContent(type="text", text=format_response(response))],
+            ),
+        )
+
+    except Exception as e:
+        ctx.logger.error(f"[error] {e}")
+        await ctx.send(
+            sender,
+            ChatMessage(
+                timestamp=datetime.utcnow(),
+                msg_id=uuid4(),
+                content=[TextContent(type="text", text="Sorry, an error occurred.")],
+            ),
+        )
+
+@chat_protocol.on_message(ChatAcknowledgement)
+async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
+    ctx.logger.info(f"[ack] from {sender} for {msg.acknowledged_msg_id}")
+
+# 4. Governance helpers (complete implementation) ----------------------------
 async def handle_create_proposal(ctx: Context, params: dict, creator: str):
     """Handle proposal creation"""
     try:
@@ -191,58 +237,41 @@ async def handle_list_active(ctx: Context):
         ctx.logger.error(f"Error listing proposals: {str(e)}")
         return "Sorry, I couldn't fetch the active proposals. Please try again."
 
-def get_help_message():
-    """Return help message"""
-    return """🤖 DeGov Oracle Help
+def get_help_message() -> str:
+    return (
+        "🤖 DeGov Oracle Help\n\n"
+        "📝 Create proposals:  \"Create proposal: Fund marketing with options For, Against\"\n"
+        "🗳️  Vote on proposals: \"Vote For on proposal 1\"\n"
+        "📊 Check status:       \"What's the status of proposal 1?\"\n"
+        "📋 List active:        \"Show active proposals\"\n\n"
+        "Just talk to me naturally - I'll understand! 🚀"
+    )
 
-I can help you with DAO governance:
-
-📝 Create proposals:
-"Create proposal: Fund marketing with options For, Against"
-
-🗳️  Vote on proposals:
-"Vote For on proposal 1"
-
-📊 Check status:
-"What's the status of proposal 1?"
-
-📋 List active proposals:
-"Show active proposals"
-
-Just talk to me naturally - I'll understand! 🚀"""
-
-# Health check endpoint - more robust approach
+# 5. Health endpoint (unchanged except protocol list) -------------------------
 @agent.on_event("startup")
-async def setup_health_endpoint(ctx: Context):
-    """Add health check endpoint"""
+async def startup(ctx: Context):
     try:
-        # Try to add health endpoint to FastAPI app
-        if hasattr(ctx, 'server') and hasattr(ctx.server, '_app'):
-            async def health_check():
+        if hasattr(ctx, "server") and hasattr(ctx.server, "_app"):
+            async def health():
                 return {
                     "status": "healthy",
+                    "protocols": ["chat"],
                     "agent_address": agent.address,
-                    "canister_url": canister_url,
-                    "endpoint_url": ENDPOINT_URL
+                    "canister_url": CANISTER_URL,
+                    "endpoint_url": ENDPOINT_URL,
                 }
-            
-            ctx.server._app.add_api_route("/health", health_check, methods=["GET"])
-            ctx.logger.info("Health endpoint added at /health")
-        else:
-            ctx.logger.warning("Could not add health endpoint - server not accessible")
+            ctx.server._app.add_api_route("/health", health, methods=["GET"])
+            ctx.logger.info("Health endpoint mounted")
     except Exception as e:
-        ctx.logger.error(f"Failed to setup health endpoint: {e}")
-    
-    # Startup logging
-    ctx.logger.info(f"DeGov Oracle Agent started!")
-    ctx.logger.info(f"Agent address: {agent.address}")
-    ctx.logger.info(f"Agent wallet: {agent.wallet.address()}")
-    ctx.logger.info(f"Running on port: {PORT}")
-    ctx.logger.info(f"Endpoint URL: {ENDPOINT_URL}")
-    ctx.logger.info(f"Canister URL: {canister_url}")
-    ctx.logger.info("Attempting registration with Almanac/Agentverse...")
+        ctx.logger.warning(f"Health endpoint error: {e}")
 
-# Register the protocol with the agent
+    ctx.logger.info("DeGov Oracle Agent ready 🎉")
+    ctx.logger.info(f"Agent address: {agent.address}")
+    ctx.logger.info(f"Endpoint URL: {ENDPOINT_URL}")
+    ctx.logger.info(f"Canister URL: {CANISTER_URL}")
+    ctx.logger.info("Using Chat Protocol for ASI:One compatibility")
+
+# 6. Register protocol & run --------------------------------------------------
 agent.include(chat_protocol, publish_manifest=True)
 
 if __name__ == "__main__":
@@ -250,7 +279,8 @@ if __name__ == "__main__":
     print(f"Agent address: {agent.address}")
     print(f"Agent wallet: {agent.wallet.address()}")
     print(f"Registering with endpoint: {ENDPOINT_URL}/submit")
-    print(f"Canister URL: {canister_url}")
+    print(f"Canister URL: {CANISTER_URL}")
+    print(f"Using Chat Protocol for ASI:One compatibility")
     
     # Run the agent
     agent.run()

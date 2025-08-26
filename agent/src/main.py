@@ -67,7 +67,7 @@ async def update_agent_details():
     """Update agent name and readme via Agentverse API"""
     try:
         # Read README content
-        readme_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'readme.md')
+        readme_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'readme.md')
         readme_content = ""
         
         try:

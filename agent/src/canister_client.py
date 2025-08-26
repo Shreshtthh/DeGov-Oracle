@@ -7,7 +7,7 @@ import logging
 from typing import Dict, Any, List
 
 import cbor2
-from ic.candid import encode, decode
+from ic.candid import encode, decode, Record, Text, Nat
 from ic.principal import Principal
 
 logging.basicConfig(
@@ -49,13 +49,9 @@ class CanisterClient:
 
     @staticmethod
     def _encode_args(args: Any) -> bytes:
-        # Log argument type and value before encoding
+        """Encode using Candid type wrappers to avoid KeyError 'type'"""
         logging.debug(f"_encode_args: args={args}, type={type(args)}")
-        # Most Motoko calls want args as tuple/list if >1 arg
-        if isinstance(args, (list, tuple)):
-            return encode(args)
-        else:
-            return encode([args])
+        return encode(args)
 
     async def _query_canister(self, method: str, args: Any) -> Dict[str, Any]:
         try:
@@ -70,7 +66,7 @@ class CanisterClient:
             }
             envelope = cbor2.dumps({"content": payload})
             url = f"{self.boundary_node_url}/api/v2/canister/{self.canister_id}/query"
-            logging.debug(f"POST {url} with payload: {payload}")
+            logging.debug(f"POST {url}")
 
             session = await self._get_session()
             async with session.post(url, data=envelope) as resp:
@@ -116,7 +112,7 @@ class CanisterClient:
             }
             envelope = cbor2.dumps({"content": payload})
             url = f"{self.boundary_node_url}/api/v2/canister/{self.canister_id}/call"
-            logging.debug(f"POST {url} with payload: {payload}")
+            logging.debug(f"POST {url}")
 
             session = await self._get_session()
             async with session.post(url, data=envelope) as resp:
@@ -124,7 +120,6 @@ class CanisterClient:
                 logging.debug(f"HTTP status={resp.status}")
                 if resp.status == 202:
                     logging.debug("Update accepted")
-                    # The update path may need to poll for reply in ICP real canister
                     return {"success": True, "data": "Update accepted"}
                 error_text = await resp.text()
                 logging.error(f"Call error: {error_text}")
@@ -154,7 +149,11 @@ class CanisterClient:
         if method == "castVote":
             return {"success": True, "data": "Vote cast successfully"}
         if method == "getProposal":
-            pid = args.get("proposalId", 1)
+            # Handle both Candid-wrapped and plain dict args
+            if hasattr(args, 'get'):
+                pid = args.get("proposalId", 1)
+            else:
+                pid = 1
             return {
                 "success": True,
                 "data": {
@@ -185,35 +184,42 @@ class CanisterClient:
         duration_hours: int,
         creator: str,
     ) -> Dict[str, Any]:
-        args = ({
-            "title": title,
-            "description": description,
-            "options": options,
-            "duration_hours": duration_hours,
-        }, creator)
+        # Use proper Candid type wrappers for Motoko canister
+        request_record = Record({
+            "title": Text(title),
+            "description": Text(description),
+            "options": [Text(opt) for opt in options],
+            "duration_hours": Nat(duration_hours),
+        })
+        args = [request_record, Text(creator)]
         logging.debug(f"create_proposal: args={args}, type={type(args)}")
         return await self._call_canister("createProposal", args, is_query=False)
 
     async def cast_vote(self, proposal_id: int, option: str, voter_id: str) -> Dict[str, Any]:
-        args = {"proposal_id": proposal_id, "option": option, "voter_id": voter_id}
+        # Use proper Candid type wrappers for castVote
+        vote_record = Record({
+            "proposal_id": Nat(proposal_id),
+            "option": Text(option),
+            "voter_id": Text(voter_id),
+        })
+        args = [vote_record]
         logging.debug(f"cast_vote: args={args}, type={type(args)}")
         return await self._call_canister("castVote", args, is_query=False)
 
     async def get_proposal(self, proposal_id: int) -> Dict[str, Any]:
-        logging.debug(f"get_proposal: proposal_id={proposal_id}")
-        return await self._call_canister(
-            "getProposal", {"proposalId": proposal_id}, is_query=True
-        )
+        args = [Nat(proposal_id)]
+        logging.debug(f"get_proposal: args={args}")
+        return await self._call_canister("getProposal", args, is_query=True)
 
     async def get_active_proposals(self) -> Dict[str, Any]:
+        args = []  # No arguments needed
         logging.debug("get_active_proposals called")
-        return await self._call_canister("getActiveProposals", {}, is_query=True)
+        return await self._call_canister("getActiveProposals", args, is_query=True)
 
     async def get_proposal_results(self, proposal_id: int) -> Dict[str, Any]:
-        logging.debug(f"get_proposal_results: proposal_id={proposal_id}")
-        return await self._call_canister(
-            "getProposalResults", {"proposalId": proposal_id}, is_query=True
-        )
+        args = [Nat(proposal_id)]
+        logging.debug(f"get_proposal_results: args={args}")
+        return await self._call_canister("getProposalResults", args, is_query=True)
 
     async def close(self):
         if self.session:

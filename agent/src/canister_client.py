@@ -50,7 +50,7 @@ class CanisterClient:
             query_payload = {
                 "request_type": "query",
                 "sender": Principal.anonymous(),  # For queries, anonymous sender is fine
-                "canister_id": Principal.from_text(self.canister_id),
+                "canister_id": Principal.from_str(self.canister_id),
                 "method_name": method,
                 "arg": encode([args]),  # Encode args using Candid
                 "ingress_expiry": int((time.time() + 300) * 1_000_000_000)  # 5 minutes from now
@@ -100,7 +100,7 @@ class CanisterClient:
             update_payload = {
                 "request_type": "call",
                 "sender": Principal.anonymous(),
-                "canister_id": Principal.from_text(self.canister_id), 
+                "canister_id": Principal.from_str(self.canister_id),
                 "method_name": method,
                 "arg": encode([args]),
                 "ingress_expiry": int((time.time() + 300) * 1_000_000_000),  # 5 minutes from now

@@ -163,7 +163,7 @@ async def _query_canister(self, method: str, args: Any):
     query_payload = {
         "request_type": "query",
         "sender": Principal.anonymous(),
-        "canister_id": Principal.from_text(self.canister_id),
+        "canister_id": Principal.from_str(self.canister_id),
         "method_name": method,
         "arg": encode([args]),
         "ingress_expiry": int((time.time() + 300) * 1_000_000_000)

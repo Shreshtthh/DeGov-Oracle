@@ -230,7 +230,13 @@ async def handle_create_proposal(ctx: Context, message: str, creator: str):
         )
         
         if result['success']:
-            proposal_id = result['data']
+            # Handle both integer and dict responses safely
+            proposal_data = result['data']
+            if isinstance(proposal_data, dict):
+                proposal_id = proposal_data.get('id', proposal_data)
+            else:
+                proposal_id = proposal_data  # It's just an integer
+            
             return f"✅ Proposal #{proposal_id} created successfully!\n\nTitle: {params['title']}\nOptions: {', '.join(params['options'])}\nVoting is now open for 72 hours."
         else:
             return f"❌ Failed to create proposal: {result['error']}"

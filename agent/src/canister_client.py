@@ -178,19 +178,13 @@ class CanisterClient:
         logging.debug(f"_mock_response: method={method}")
         import random
         if method == "createProposal":
-            return {"success": True, "data": random.randint(1, 1000)}
-        if method == "castVote":
-            return {"success": True, "data": "Vote cast successfully"}
-        if method == "getProposal":
+        # Return a proper result structure
             return {
-                "success": True,
+                "success": True, 
                 "data": {
-                    "id": 1,
-                    "title": "Mock Proposal",
-                    "description": "A mock proposal",
-                    "status": "Active",
-                    "votes": [("For", 3), ("Against", 1)],
-                },
+                    "id": random.randint(1, 1000),
+                    "status": "created"
+                }
             }
         if method == "getActiveProposals":
             return {

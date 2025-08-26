@@ -56,8 +56,10 @@ class CanisterClient:
         needing an explicit IDL schema.  Strategy:
            python → JSON str → encode([text])
         """
-        wrapped = args if isinstance(args, (dict, list, tuple)) else [args]
-        return encode([wrapped])
+        if isinstance(args, (list, tuple)):
+            return encode(args)
+        else:
+            return encode([args])
 
     # ---------------------------------------------------------------------
     # low-level query & update routes
@@ -195,8 +197,9 @@ class CanisterClient:
             "description": description,
             "options": options,
             "duration_hours": duration_hours,
-            "creator": creator,
-        }
+        },
+        creator
+
         return await self._call_canister("createProposal", args, is_query=False)
 
     async def cast_vote(

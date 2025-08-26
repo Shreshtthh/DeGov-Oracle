@@ -5,10 +5,19 @@ import time
 import hashlib
 import logging
 from typing import Dict, Any, List
+from datetime import datetime, UTC
 
 import cbor2
 from ic.candid import encode, decode
 from ic.principal import Principal
+
+# Try to import IDL factory - fall back to JSON encoding if not available
+try:
+    from ic.candid import IDL, Types
+    HAS_IDL = True
+except ImportError:
+    HAS_IDL = False
+    logging.warning("IDL factory not available, using JSON encoding fallback")
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -20,8 +29,8 @@ _LOG.setLevel(logging.DEBUG)
 
 class CanisterClient:
     """
-    Minimal ICP HTTP-gateway client.
-    Converts arbitrary python args → Candid bytes for Motoko canister calls.
+    ICP HTTP-gateway client with proper IDL factory support.
+    Falls back to JSON encoding if IDL factory is not available.
     """
 
     def __init__(self, canister_url: str):
@@ -48,32 +57,22 @@ class CanisterClient:
         return self.session
 
     @staticmethod
-    def _encode_args(args: Any) -> bytes:
-        """Encode args without explicit type definitions"""
-        logging.debug(f"_encode_args: args={args}, type={type(args)}")
-        
-        # For multiple arguments (like createProposal), pass as list directly
-        if isinstance(args, (list, tuple)):
-            # Convert each argument to appropriate format
-            formatted_args = []
-            for arg in args:
-                if isinstance(arg, dict):
-                    formatted_args.append(arg)
-                else:
-                    formatted_args.append(arg)
-            return encode(formatted_args)
-        else:
-            return encode([args])
+    def _encode_args_json_fallback(args: Any) -> bytes:
+        """Fallback JSON encoding when IDL factory is not available"""
+        logging.debug(f"_encode_args_json_fallback: args={args}, type={type(args)}")
+        json_string = json.dumps(args, separators=(',', ':'))
+        logging.debug(f"JSON encoded: {json_string}")
+        return encode([json_string])
 
-    async def _query_canister(self, method: str, args: Any) -> Dict[str, Any]:
+    async def _query_canister(self, method: str, encoded_args: bytes) -> Dict[str, Any]:
         try:
-            logging.debug(f"_query_canister: method={method}, args={args}, type={type(args)}")
+            logging.debug(f"_query_canister: method={method}")
             payload = {
                 "request_type": "query",
                 "sender": Principal.anonymous(),
                 "canister_id": Principal.from_str(self.canister_id),
                 "method_name": method,
-                "arg": self._encode_args(args),
+                "arg": encoded_args,
                 "ingress_expiry": int((time.time() + 300) * 1_000_000_000),
             }
             envelope = cbor2.dumps({"content": payload})
@@ -111,15 +110,15 @@ class CanisterClient:
             logging.exception("Exception in _query_canister")
             return {"success": False, "error": f"Network error: {exc}"}
 
-    async def _update_canister(self, method: str, args: Any) -> Dict[str, Any]:
+    async def _update_canister(self, method: str, encoded_args: bytes) -> Dict[str, Any]:
         try:
-            logging.debug(f"_update_canister: method={method}, args={args}, type={type(args)}")
+            logging.debug(f"_update_canister: method={method}")
             payload = {
                 "request_type": "call",
                 "sender": Principal.anonymous(),
                 "canister_id": Principal.from_str(self.canister_id),
                 "method_name": method,
-                "arg": self._encode_args(args),
+                "arg": encoded_args,
                 "ingress_expiry": int((time.time() + 300) * 1_000_000_000),
             }
             envelope = cbor2.dumps({"content": payload})
@@ -143,34 +142,32 @@ class CanisterClient:
             logging.exception("Exception in _update_canister")
             return {"success": False, "error": f"Network error: {exc}"}
 
-    async def _call_canister(self, method: str, args: Any, is_query: bool = True) -> Dict[str, Any]:
-        logging.debug(f"_call_canister: method={method}, args={args}, type={type(args)} is_query={is_query}")
+    async def _call_canister_with_encoded_args(self, method: str, encoded_args: bytes, is_query: bool = True) -> Dict[str, Any]:
+        """Call canister with pre-encoded arguments"""
+        logging.debug(f"_call_canister_with_encoded_args: method={method}, is_query={is_query}")
+        
+        # Check if we're in local development mode
         if any(host in self.boundary_node_url for host in ("127.0.0.1", "localhost")):
             logging.debug("Calling mock response (local)")
-            return await self._mock_response(method, args)
+            return await self._mock_response(method, {})  # Pass empty dict for mock
+            
         if is_query:
-            return await self._query_canister(method, args)
+            return await self._query_canister(method, encoded_args)
         else:
-            return await self._update_canister(method, args)
+            return await self._update_canister(method, encoded_args)
 
     async def _mock_response(self, method: str, args: Any) -> Dict[str, Any]:
-        logging.debug(f"_mock_response: method={method}, args={args}, type={type(args)}")
+        logging.debug(f"_mock_response: method={method}")
         import random
         if method == "createProposal":
             return {"success": True, "data": random.randint(1, 1000)}
         if method == "castVote":
             return {"success": True, "data": "Vote cast successfully"}
         if method == "getProposal":
-            # Handle both list and dict args
-            pid = 1
-            if isinstance(args, list) and len(args) > 0:
-                pid = args[0] if isinstance(args[0], int) else 1
-            elif isinstance(args, dict):
-                pid = args.get("proposalId", 1)
             return {
                 "success": True,
                 "data": {
-                    "id": pid,
+                    "id": 1,
                     "title": "Mock Proposal",
                     "description": "A mock proposal",
                     "status": "Active",
@@ -197,41 +194,135 @@ class CanisterClient:
         duration_hours: int,
         creator: str,
     ) -> Dict[str, Any]:
-        # Format arguments as expected by Motoko canister
-        request_data = {
-            "title": title,
-            "description": description,
-            "options": options,
-            "duration_hours": duration_hours,
+        logging.debug(f"create_proposal called with title='{title}', creator='{creator}'")
+        
+        if HAS_IDL:
+            # Use proper IDL factory encoding
+            try:
+                # Define the types for the Motoko canister function's arguments
+                ProposalRequest = IDL.Record({
+                    "title": Types.Text,
+                    "description": Types.Text,
+                    "options": Types.Vec(Types.Text),
+                    "duration_hours": Types.Nat64,
+                })
+                
+                # Create the Python values
+                request_data = {
+                    "title": title,
+                    "description": description,
+                    "options": options,
+                    "duration_hours": duration_hours,
+                }
+                
+                # Use the IDL to encode the arguments together
+                encoded_args, = IDL.encode([ProposalRequest, Types.Text], [request_data, creator])
+                logging.debug("Using IDL factory encoding")
+                
+                return await self._call_canister_with_encoded_args("createProposal", encoded_args, is_query=False)
+            except Exception as e:
+                logging.error(f"IDL encoding failed: {e}, falling back to JSON")
+                # Fall through to JSON fallback
+        
+        # Fallback to JSON encoding
+        args = {
+            "request": {
+                "title": title,
+                "description": description,
+                "options": options,
+                "duration_hours": duration_hours,
+            },
+            "creator": creator
         }
-        args = [request_data, creator]
-        logging.debug(f"create_proposal: args={args}, type={type(args)}")
-        return await self._call_canister("createProposal", args, is_query=False)
+        encoded_args = self._encode_args_json_fallback(args)
+        logging.debug("Using JSON fallback encoding")
+        return await self._call_canister_with_encoded_args("createProposal", encoded_args, is_query=False)
 
     async def cast_vote(self, proposal_id: int, option: str, voter_id: str) -> Dict[str, Any]:
-        vote_data = {
+        logging.debug(f"cast_vote called for proposal {proposal_id}")
+        
+        if HAS_IDL:
+            try:
+                # Define the vote request type
+                VoteRequest = IDL.Record({
+                    "proposal_id": Types.Nat64,
+                    "option": Types.Text,
+                    "voter_id": Types.Text,
+                })
+                
+                request_data = {
+                    "proposal_id": proposal_id,
+                    "option": option,
+                    "voter_id": voter_id,
+                }
+                
+                encoded_args, = IDL.encode([VoteRequest], [request_data])
+                logging.debug("Using IDL factory encoding")
+                
+                return await self._call_canister_with_encoded_args("castVote", encoded_args, is_query=False)
+            except Exception as e:
+                logging.error(f"IDL encoding failed: {e}, falling back to JSON")
+        
+        # Fallback to JSON encoding
+        args = {
             "proposal_id": proposal_id,
             "option": option,
             "voter_id": voter_id,
         }
-        args = [vote_data]
-        logging.debug(f"cast_vote: args={args}, type={type(args)}")
-        return await self._call_canister("castVote", args, is_query=False)
+        encoded_args = self._encode_args_json_fallback(args)
+        logging.debug("Using JSON fallback encoding")
+        return await self._call_canister_with_encoded_args("castVote", encoded_args, is_query=False)
 
     async def get_proposal(self, proposal_id: int) -> Dict[str, Any]:
-        args = [proposal_id]
-        logging.debug(f"get_proposal: args={args}")
-        return await self._call_canister("getProposal", args, is_query=True)
+        logging.debug(f"get_proposal called for proposal {proposal_id}")
+        
+        if HAS_IDL:
+            try:
+                encoded_args, = IDL.encode([Types.Nat64], [proposal_id])
+                logging.debug("Using IDL factory encoding")
+                return await self._call_canister_with_encoded_args("getProposal", encoded_args, is_query=True)
+            except Exception as e:
+                logging.error(f"IDL encoding failed: {e}, falling back to JSON")
+        
+        # Fallback to JSON encoding
+        args = {"proposalId": proposal_id}
+        encoded_args = self._encode_args_json_fallback(args)
+        logging.debug("Using JSON fallback encoding")
+        return await self._call_canister_with_encoded_args("getProposal", encoded_args, is_query=True)
 
     async def get_active_proposals(self) -> Dict[str, Any]:
-        args = []  # No arguments needed
         logging.debug("get_active_proposals called")
-        return await self._call_canister("getActiveProposals", args, is_query=True)
+        
+        if HAS_IDL:
+            try:
+                # No arguments needed
+                encoded_args, = IDL.encode([], [])
+                logging.debug("Using IDL factory encoding")
+                return await self._call_canister_with_encoded_args("getActiveProposals", encoded_args, is_query=True)
+            except Exception as e:
+                logging.error(f"IDL encoding failed: {e}, falling back to JSON")
+        
+        # Fallback to JSON encoding
+        encoded_args = self._encode_args_json_fallback({})
+        logging.debug("Using JSON fallback encoding")
+        return await self._call_canister_with_encoded_args("getActiveProposals", encoded_args, is_query=True)
 
     async def get_proposal_results(self, proposal_id: int) -> Dict[str, Any]:
-        args = [proposal_id]
-        logging.debug(f"get_proposal_results: args={args}")
-        return await self._call_canister("getProposalResults", args, is_query=True)
+        logging.debug(f"get_proposal_results called for proposal {proposal_id}")
+        
+        if HAS_IDL:
+            try:
+                encoded_args, = IDL.encode([Types.Nat64], [proposal_id])
+                logging.debug("Using IDL factory encoding")
+                return await self._call_canister_with_encoded_args("getProposalResults", encoded_args, is_query=True)
+            except Exception as e:
+                logging.error(f"IDL encoding failed: {e}, falling back to JSON")
+        
+        # Fallback to JSON encoding
+        args = {"proposalId": proposal_id}
+        encoded_args = self._encode_args_json_fallback(args)
+        logging.debug("Using JSON fallback encoding")
+        return await self._call_canister_with_encoded_args("getProposalResults", encoded_args, is_query=True)
 
     async def close(self):
         if self.session:

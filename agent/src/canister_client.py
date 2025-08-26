@@ -7,7 +7,7 @@ import logging
 from typing import Dict, Any, List
 
 import cbor2
-from ic.candid import encode, decode, Record, Text, Nat
+from ic.candid import encode, decode
 from ic.principal import Principal
 
 logging.basicConfig(
@@ -49,9 +49,21 @@ class CanisterClient:
 
     @staticmethod
     def _encode_args(args: Any) -> bytes:
-        """Encode using Candid type wrappers to avoid KeyError 'type'"""
+        """Encode args without explicit type definitions"""
         logging.debug(f"_encode_args: args={args}, type={type(args)}")
-        return encode(args)
+        
+        # For multiple arguments (like createProposal), pass as list directly
+        if isinstance(args, (list, tuple)):
+            # Convert each argument to appropriate format
+            formatted_args = []
+            for arg in args:
+                if isinstance(arg, dict):
+                    formatted_args.append(arg)
+                else:
+                    formatted_args.append(arg)
+            return encode(formatted_args)
+        else:
+            return encode([args])
 
     async def _query_canister(self, method: str, args: Any) -> Dict[str, Any]:
         try:
@@ -85,7 +97,7 @@ class CanisterClient:
                     logging.debug(f"Decoded canister reply: {decoded}, type={type(decoded)}")
                     return {
                         "success": True,
-                        "data": decoded[0],
+                        "data": decoded[0] if decoded else None,
                     }
                 if "rejected" in data:
                     logging.error(f"Query rejected: {data['rejected']}")
@@ -149,11 +161,12 @@ class CanisterClient:
         if method == "castVote":
             return {"success": True, "data": "Vote cast successfully"}
         if method == "getProposal":
-            # Handle both Candid-wrapped and plain dict args
-            if hasattr(args, 'get'):
+            # Handle both list and dict args
+            pid = 1
+            if isinstance(args, list) and len(args) > 0:
+                pid = args[0] if isinstance(args[0], int) else 1
+            elif isinstance(args, dict):
                 pid = args.get("proposalId", 1)
-            else:
-                pid = 1
             return {
                 "success": True,
                 "data": {
@@ -184,30 +197,29 @@ class CanisterClient:
         duration_hours: int,
         creator: str,
     ) -> Dict[str, Any]:
-        # Use proper Candid type wrappers for Motoko canister
-        request_record = Record({
-            "title": Text(title),
-            "description": Text(description),
-            "options": [Text(opt) for opt in options],
-            "duration_hours": Nat(duration_hours),
-        })
-        args = [request_record, Text(creator)]
+        # Format arguments as expected by Motoko canister
+        request_data = {
+            "title": title,
+            "description": description,
+            "options": options,
+            "duration_hours": duration_hours,
+        }
+        args = [request_data, creator]
         logging.debug(f"create_proposal: args={args}, type={type(args)}")
         return await self._call_canister("createProposal", args, is_query=False)
 
     async def cast_vote(self, proposal_id: int, option: str, voter_id: str) -> Dict[str, Any]:
-        # Use proper Candid type wrappers for castVote
-        vote_record = Record({
-            "proposal_id": Nat(proposal_id),
-            "option": Text(option),
-            "voter_id": Text(voter_id),
-        })
-        args = [vote_record]
+        vote_data = {
+            "proposal_id": proposal_id,
+            "option": option,
+            "voter_id": voter_id,
+        }
+        args = [vote_data]
         logging.debug(f"cast_vote: args={args}, type={type(args)}")
         return await self._call_canister("castVote", args, is_query=False)
 
     async def get_proposal(self, proposal_id: int) -> Dict[str, Any]:
-        args = [Nat(proposal_id)]
+        args = [proposal_id]
         logging.debug(f"get_proposal: args={args}")
         return await self._call_canister("getProposal", args, is_query=True)
 
@@ -217,7 +229,7 @@ class CanisterClient:
         return await self._call_canister("getActiveProposals", args, is_query=True)
 
     async def get_proposal_results(self, proposal_id: int) -> Dict[str, Any]:
-        args = [Nat(proposal_id)]
+        args = [proposal_id]
         logging.debug(f"get_proposal_results: args={args}")
         return await self._call_canister("getProposalResults", args, is_query=True)
 

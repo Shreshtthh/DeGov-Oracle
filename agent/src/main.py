@@ -20,7 +20,8 @@ agent = Agent(
     name=os.getenv("AGENT_NAME", "degov_oracle"),
     seed=os.getenv("AGENT_SEED", "degov-oracle-seed-12345"),
     port=port,
-    endpoint=[f"http://0.0.0.0:{port}/submit"]  # Use 0.0.0.0 for external access
+    endpoint=[f"http://0.0.0.0:{port}/submit"],
+    mailbox=True  # Use 0.0.0.0 for external access
 )
 
 # Fund agent if needed (this also helps with registration)
@@ -212,7 +213,7 @@ I can help you with DAO governance:
 Just talk to me naturally - I'll understand! 🚀"""
 
 # Register the protocol with the agent
-agent.include(chat_protocol)
+agent.include(chat_protocol, publish_manifest=True)
 
 # Add startup event to ensure registration
 @agent.on_event("startup")

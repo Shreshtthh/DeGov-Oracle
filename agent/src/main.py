@@ -12,19 +12,29 @@ from utils import format_response, validate_input
 # Load environment variables
 load_dotenv()
 
-# Get port from environment (Render uses PORT, Heroku uses PORT too)
-port = int(os.getenv("PORT", 8001))
+# Get deployment-specific configuration
+PORT = int(os.getenv("PORT", 8001))
+
+# Use Render's standard variable, falling back to localhost for local testing
+ENDPOINT_URL = os.getenv("RENDER_EXTERNAL_URL", f"http://127.0.0.1:{PORT}")
+
+# Initialize canister client
+canister_url = (
+    os.getenv("CANISTER_URL") or 
+    os.getenv("LOCAL_CANISTER_URL") or 
+    "http://localhost:4943/?canisterId=rdmx6-jaaaa-aaaaa-aaadq-cai"
+)
 
 # Initialize agent with proper configuration for deployment
 agent = Agent(
     name=os.getenv("AGENT_NAME", "degov_oracle"),
     seed=os.getenv("AGENT_SEED", "degov-oracle-seed-12345"),
-    port=port,
-    endpoint=[f"http://0.0.0.0:{port}/submit"],
-    mailbox=True  # Use 0.0.0.0 for external access
+    port=PORT,
+    endpoint=[f"{ENDPOINT_URL}/submit"],
+    mailbox=True  # Required for Agentverse registration
 )
 
-# Fund agent if needed (this also helps with registration)
+# Fund agent if needed
 try:
     fund_agent_if_low(agent.wallet.address())
 except Exception as e:
@@ -32,21 +42,13 @@ except Exception as e:
 
 # Initialize components
 intent_classifier = IntentClassifier()
-
-# Initialize canister client with fallback
-canister_url = (
-    os.getenv("CANISTER_URL") or 
-    os.getenv("LOCAL_CANISTER_URL") or 
-    "http://localhost:4943/?canisterId=rdmx6-jaaaa-aaaaa-aaadq-cai"  # fallback
-)
-
 canister_client = CanisterClient(canister_url)
 
-# Define a simple Pydantic model for string messages
+# Define message model
 class Message(BaseModel):
     message: str
 
-# Chat protocol for ASI:One
+# Setup chat protocol
 chat_protocol = Protocol("DeGov Chat")
 
 @chat_protocol.on_message(model=Message)
@@ -128,7 +130,6 @@ async def handle_cast_vote(ctx: Context, params: dict, voter: str):
             status_result = await canister_client.get_proposal(params['proposal_id'])
             if status_result['success']:
                 proposal = status_result['data']
-                # Handle votes as list of tuples from Motoko
                 votes_list = proposal.get('votes', [])
                 vote_summary = ", ".join([f"{opt}: {count}" for opt, count in votes_list])
                 return f"✅ Vote cast successfully!\n\nProposal #{params['proposal_id']} current results:\n{vote_summary}"
@@ -152,7 +153,6 @@ async def handle_check_status(ctx: Context, params: dict):
         
         if result['success']:
             proposal = result['data']
-            # Handle votes as list of tuples from Motoko
             votes_list = proposal.get('votes', [])
             vote_summary = "\n".join([f"  {opt}: {count} votes" for opt, count in votes_list])
             total_votes = sum([count for opt, count in votes_list])
@@ -178,8 +178,7 @@ async def handle_list_active(ctx: Context):
                 return "📝 No active proposals at the moment. Would you like to create one?"
             
             proposal_list = []
-            for proposal in proposals[:5]:  # Limit to 5 for chat readability
-                # Handle votes as list of tuples from Motoko
+            for proposal in proposals[:5]:
                 votes_list = proposal.get('votes', [])
                 total_votes = sum([count for opt, count in votes_list])
                 proposal_list.append(f"#{proposal['id']}: {proposal['title']} ({total_votes} votes)")
@@ -212,24 +211,45 @@ I can help you with DAO governance:
 
 Just talk to me naturally - I'll understand! 🚀"""
 
-# Register the protocol with the agent
-agent.include(chat_protocol, publish_manifest=True)
-
-# Add startup event to ensure registration
+# Health check endpoint - more robust approach
 @agent.on_event("startup")
-async def startup_event(ctx: Context):
-    """Handle startup tasks"""
+async def setup_health_endpoint(ctx: Context):
+    """Add health check endpoint"""
+    try:
+        # Try to add health endpoint to FastAPI app
+        if hasattr(ctx, 'server') and hasattr(ctx.server, '_app'):
+            async def health_check():
+                return {
+                    "status": "healthy",
+                    "agent_address": agent.address,
+                    "canister_url": canister_url,
+                    "endpoint_url": ENDPOINT_URL
+                }
+            
+            ctx.server._app.add_api_route("/health", health_check, methods=["GET"])
+            ctx.logger.info("Health endpoint added at /health")
+        else:
+            ctx.logger.warning("Could not add health endpoint - server not accessible")
+    except Exception as e:
+        ctx.logger.error(f"Failed to setup health endpoint: {e}")
+    
+    # Startup logging
     ctx.logger.info(f"DeGov Oracle Agent started!")
     ctx.logger.info(f"Agent address: {agent.address}")
     ctx.logger.info(f"Agent wallet: {agent.wallet.address()}")
-    ctx.logger.info(f"Running on port: {port}")
+    ctx.logger.info(f"Running on port: {PORT}")
+    ctx.logger.info(f"Endpoint URL: {ENDPOINT_URL}")
     ctx.logger.info(f"Canister URL: {canister_url}")
+    ctx.logger.info("Attempting registration with Almanac/Agentverse...")
+
+# Register the protocol with the agent
+agent.include(chat_protocol, publish_manifest=True)
 
 if __name__ == "__main__":
     print(f"DeGov Oracle Agent starting...")
     print(f"Agent address: {agent.address}")
     print(f"Agent wallet: {agent.wallet.address()}")
-    print(f"Running on port: {port}")
+    print(f"Registering with endpoint: {ENDPOINT_URL}/submit")
     print(f"Canister URL: {canister_url}")
     
     # Run the agent

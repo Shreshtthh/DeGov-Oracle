@@ -103,21 +103,76 @@ class CanisterClient:
                     return {"success": True, "data": "Update accepted"}
 
                 if resp.status != 200:
-                    return {"success": False, "error": f"HTTP {resp.status}: {await resp.text()}"}
+                    error_text = await resp.text()
+                    logging.error(f"HTTP error {resp.status}: {error_text}")
+                    return {"success": False, "error": f"HTTP {resp.status}: {error_text}"}
 
-                data = cbor2.loads(raw_data)
-                if "replied" in data:
-                    decoded_result, = decode(data["replied"]["arg"])
-                    if isinstance(decoded_result, dict) and "Ok" in decoded_result:
-                        return {"success": True, "data": decoded_result["Ok"]}
-                    elif isinstance(decoded_result, dict) and "Err" in decoded_result:
-                        return {"success": False, "error": decoded_result["Err"]}
-                    return {"success": True, "data": decoded_result}
+                # Parse CBOR response
+                try:
+                    data = cbor2.loads(raw_data)
+                    logging.debug(f"Parsed CBOR data: {data}")
+                except Exception as e:
+                    logging.error(f"Failed to parse CBOR data: {e}")
+                    return {"success": False, "error": f"CBOR parsing error: {e}"}
 
-                if "rejected" in data:
-                    return {"success": False, "error": data["rejected"]}
+                # Handle different response types
+                if isinstance(data, dict):
+                    if "replied" in data:
+                        try:
+                            # Ensure we have bytes for decode
+                            arg_data = data["replied"]["arg"]
+                            if isinstance(arg_data, str):
+                                # If it's a string, it might be base64 encoded
+                                import base64
+                                try:
+                                    arg_data = base64.b64decode(arg_data)
+                                except Exception:
+                                    logging.error(f"Failed to decode base64 arg: {arg_data}")
+                                    return {"success": False, "error": "Invalid arg format"}
+                            
+                            # Decode the candid result
+                            decoded_result = decode(arg_data)
+                            logging.debug(f"Decoded result: {decoded_result}")
+                            
+                            # Handle the decoded result
+                            if isinstance(decoded_result, (list, tuple)) and len(decoded_result) > 0:
+                                result = decoded_result[0]
+                            else:
+                                result = decoded_result
+                            
+                            # Check for Ok/Err pattern
+                            if isinstance(result, dict):
+                                if "Ok" in result:
+                                    return {"success": True, "data": result["Ok"]}
+                                elif "Err" in result:
+                                    return {"success": False, "error": result["Err"]}
+                            
+                            return {"success": True, "data": result}
+                            
+                        except Exception as e:
+                            logging.error(f"Failed to decode candid data: {e}")
+                            logging.error(f"Raw arg data type: {type(data['replied']['arg'])}")
+                            logging.error(f"Raw arg data: {data['replied']['arg']}")
+                            return {"success": False, "error": f"Candid decode error: {e}"}
 
-                return {"success": False, "error": "Unknown response format"}
+                    elif "rejected" in data:
+                        error_info = data["rejected"]
+                        logging.error(f"Request rejected: {error_info}")
+                        return {"success": False, "error": f"Request rejected: {error_info}"}
+                    
+                    elif "status" in data:
+                        # Handle status responses for update calls
+                        status = data["status"]
+                        if status == "replied":
+                            return {"success": True, "data": "Update completed"}
+                        elif status == "rejected":
+                            return {"success": False, "error": "Update rejected"}
+                        else:
+                            return {"success": True, "data": f"Status: {status}"}
+                
+                # If we get here, we have an unexpected response format
+                logging.warning(f"Unknown response format: {data}")
+                return {"success": False, "error": f"Unknown response format: {type(data)}"}
 
         except Exception as exc:
             logging.exception(f"Exception in _call_canister for method {method}")

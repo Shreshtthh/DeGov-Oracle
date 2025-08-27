@@ -5,7 +5,7 @@ import time
 from typing import Dict, Any, List
 
 import cbor2
-from ic.candid import IDL, Types, encode, decode
+from ic.candid import encode, decode, Types
 from ic.principal import Principal
 
 logging.basicConfig(
@@ -179,30 +179,36 @@ class CanisterClient:
             return {"success": False, "error": f"Network error: {exc}"}
 
     async def create_proposal(self, title: str, description: str, options: List[str], duration_hours: int, creator: str) -> Dict[str, Any]:
-        ProposalRequest = IDL.Record({
-            "title": Types.Text, "description": Types.Text,
-            "options": Types.Vec(Types.Text), "duration_hours": Types.Nat,
-        })
-        request_data = {"title": title, "description": description, "options": options, "duration_hours": duration_hours}
-        encoded_args, = IDL.encode([ProposalRequest, Types.Text], [request_data, creator])
+        # Encode parameters using ic-py format
+        params = [
+            {'type': Types.Record({'title': Types.Text, 'description': Types.Text, 'options': Types.Vec(Types.Text), 'duration_hours': Types.Nat}), 
+             'value': {"title": title, "description": description, "options": options, "duration_hours": duration_hours}},
+            {'type': Types.Text, 'value': creator}
+        ]
+        encoded_args = encode(params)
         return await self._call_canister("createProposal", encoded_args, is_query=False)
 
     async def cast_vote(self, proposal_id: int, option: str, voter_id: str) -> Dict[str, Any]:
-        VoteRequest = IDL.Record({"proposal_id": Types.Nat, "option": Types.Text, "voter_id": Types.Text})
-        request_data = {"proposal_id": proposal_id, "option": option, "voter_id": voter_id}
-        encoded_args, = IDL.encode([VoteRequest], [request_data])
+        params = [
+            {'type': Types.Record({'proposal_id': Types.Nat, 'option': Types.Text, 'voter_id': Types.Text}),
+             'value': {"proposal_id": proposal_id, "option": option, "voter_id": voter_id}}
+        ]
+        encoded_args = encode(params)
         return await self._call_canister("castVote", encoded_args, is_query=False)
 
     async def get_proposal(self, proposal_id: int) -> Dict[str, Any]:
-        encoded_args, = IDL.encode([Types.Nat], [proposal_id])
+        params = [{'type': Types.Nat, 'value': proposal_id}]
+        encoded_args = encode(params)
         return await self._call_canister("getProposal", encoded_args, is_query=True)
 
     async def get_active_proposals(self) -> Dict[str, Any]:
-        encoded_args, = IDL.encode([], [])
+        params = []  # Empty params for methods with no arguments
+        encoded_args = encode(params)
         return await self._call_canister("getActiveProposals", encoded_args, is_query=True)
 
     async def get_proposal_results(self, proposal_id: int) -> Dict[str, Any]:
-        encoded_args, = IDL.encode([Types.Nat], [proposal_id])
+        params = [{'type': Types.Nat, 'value': proposal_id}]
+        encoded_args = encode(params)
         return await self._call_canister("getProposalResults", encoded_args, is_query=True)
 
     async def close(self):

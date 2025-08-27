@@ -5,7 +5,7 @@ import time  # Fix #1: Added missing import
 from typing import Dict, Any, List
 
 import cbor2
-from ic.candid import IDL, Types, encode, decode
+from ic.candid import Types, encode, decode
 from ic.principal import Principal
 
 logging.basicConfig(
